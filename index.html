@@ -1,639 +1,605 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
-import ReactMarkdown from 'react-markdown';
-import { Loader2, Zap, ArrowLeft, ArrowRight, BookOpen, Volume2, Mic, StopCircle, Play, Edit2, Save } from 'lucide-react';
-
-// Utility functions for PCM audio data conversion (required for Gemini TTS output)
-const base64ToArrayBuffer = (base64) => {
-    const binaryString = atob(base64);
-    const len = binaryString.length;
-    const bytes = new Uint8Array(len);
-    for (let i = 0; i < len; i++) {
-        bytes[i] = binaryString.charCodeAt(i);
-    }
-    return bytes.buffer;
-};
-
-const writeString = (view, offset, string) => {
-    for (let i = 0; i < string.length; i++) {
-        view.setUint8(offset + i, string.charCodeAt(i));
-    }
-};
-
-const pcmToWav = (pcm16, sampleRate) => {
-    const numChannels = 1;
-    const numSamples = pcm16.length;
-    const buffer = new ArrayBuffer(44 + numSamples * 2);
-    const view = new DataView(buffer);
-    let offset = 0;
-
-    // RIFF identifier
-    writeString(view, offset, 'RIFF'); offset += 4;
-    // file length
-    view.setUint32(offset, 36 + numSamples * 2, true); offset += 4;
-    // RIFF type
-    writeString(view, offset, 'WAVE'); offset += 4;
-    // format chunk identifier
-    writeString(view, offset, 'fmt '); offset += 4;
-    // format chunk length
-    view.setUint32(offset, 16, true); offset += 4;
-    // sample format (1 = PCM)
-    view.setUint16(offset, 1, true); offset += 2;
-    // number of channels
-    view.setUint16(offset, numChannels, true); offset += 2;
-    // sample rate
-    view.setUint32(offset, sampleRate, true); offset += 4;
-    // byte rate (sample rate * block align)
-    view.setUint32(offset, sampleRate * 2, true); offset += 4;
-    // block align (num channels * bytes per sample)
-    view.setUint16(offset, numChannels * 2, true); offset += 2;
-    // bits per sample
-    view.setUint16(offset, 16, true); offset += 2;
-    // data chunk identifier
-    writeString(view, offset, 'data'); offset += 4;
-    // data chunk length
-    view.setUint32(offset, numSamples * 2, true); offset += 4;
-
-    // write PCM data
-    for (let i = 0; i < numSamples; i++) {
-        view.setInt16(offset, pcm16[i], true);
-        offset += 2;
-    }
-
-    return new Blob([view], { type: 'audio/wav' });
-};
-
-
-// The user's provided presentation script, manually segmented for initial load
-const INITIAL_SCRIPT_SEGMENTS = [
-  {
-    title: "一、開場與核心論點 (Opening & Thesis)",
-    text: `各位長官大家好，今天想跟大家分享的是：我們如何用 11 個共同生活圈，重新把「治理」講成「生活」。
-因為我們這次的影像企劃，目標不是做城市介紹，而是把新北的治理，用更貼近居民的方法說出來。一句話總結就是：
-新北，不只是一座城市，而是一張正在呼吸的生活網絡。`,
-  },
-  {
-    title: "二、生活圈的必要性 (Justification)",
-    text: `為什麼要用共同生活圈？
-
-過去我們看城市，習慣用行政區來理解。但真實生活不是這樣運作的——市民不是沿著行政界線生活，而是沿著交通、需求、日常習慣、生活軸線在移動。
-例如市民會說：
-- 「我早上搭輕軌去上班」
-- 「中午去河濱吃飯」
-- 「週末去海邊散步」
-這些，其實就是生活圈真正的邊界。
-因此，11 個共同生活圈不是新的名詞，而是把城市照著生活方式重新分類。每一圈都有自己獨特的節奏，也有不同的治理需求。`,
-  },
-  {
-    title: "三、影片敘事模型 (Narrative Model: Man, Movement, Vision)",
-    text: `影片的核心敘事：從人、到移動、到願景
-
-為了讓 11 支影片都有一致的結構，我們設計了一套非常清楚的敘事模型：
-
-第一層：人物（點）——故事從在地人開始
-每一支影片會由一位「生活導覽員」帶路。不一定是名人，而是：
-- 回鄉青年
-- 工匠、職人
-- 長期在地耕耘的人
-- 或某個生活圈的典型角色
-他們的語氣、眼睛看到的世界，就是影片進入那個生活圈的入口。
-
-第二層：移動（線）——看生活如何被連起來
-接著會進入「線」。
-輕軌、捷運、渡船、步道、自行車道……這些公共建設不是冷冰冰的交通工具，而是生活在流動的方式。
-透過移動，我們能讓觀眾感受到：
-- 工作與生活怎麼串起來
-- 城鄉節奏如何交會
-- 各生活圈之間真正的「距離感」
-線其實就是生活的節奏。
-
-第三層：治理（面）——城市的願景與底層邏輯
-最外層，我們才帶回治理。
-但我們不會用工程講工程，而是透過生活來講：
-「這個建設怎麼影響大家的日常？」「這件事讓生活變得更安全、更永續了嗎？」
-像海岸防災、坡地治理、環境永續、水梯田復育……這些都不是政策標語，而是生活得以更穩定的「底層支撐」。`,
-  },
-  {
-    title: "四、影片內容範例 (Video Content Example)",
-    text: `一支影片會呈現的面向（以生活圈範例概述）
-
-我這邊不會細講完整腳本，而是讓大家理解一支生活圈影片的「組成」。
-影片通常會包含這些元素：
-- 生活導覽員的個人故事與在地感受
-- 這個生活圈的日常畫面與特色節奏
-- 交通移動、如何讓生活被串聯起來
-- 地方的風味文化與生活記憶點
-- 治理建設與永續的實質影響
-例如在北海岸生活圈，我們可能會讓觀眾感受到：
-- 一天的節奏如何從海邊、山邊一路串起來
-- 當地產業與觀光如何共存
-- 交通建設如何讓城市的距離變小
-- 海岸保育與觀光永續如何一起運作
-重點不是介紹哪一個地點，而是讓觀眾感受到這個生活圈「生活起來是什麼感覺」。`,
-  },
-  {
-    title: "五、整體宣傳影片 (Overall Campaign Video)",
-    text: `整體宣傳影片：城市網絡的全景
-
-除了 11 支生活圈影片，我們會再拍一支整體宣傳影片。
-它的定位會比較像是一支「城市預告片」，從更高的角度，把 11 種節奏串成一張完整的新北生活網絡。
-這支影片要讓觀眾明白三件事：
-1. 新北是一個多節奏、多核心的城市網絡
-2. 治理不是抽象政策，而是每天看得到的改變
-3. 城市正在進行式，11 種生活節奏一起向前走
-整體宣傳影片會搭配市長訪談、市民短訪、地景畫面、治理成果與生活日常。讓「城市治理」真正變成「每個人都能理解的生活故事」。`,
-  },
-  {
-    title: "六、短影音策略 (Short Video Strategy)",
-    text: `短影音策略：讓生活圈在社群裡自然亮起來
-
-在 IG、抖音與 Shorts 的部分，我們會把影片拆成：
-- 一支整體精華短版
-- 11 支生活圈的獨立亮點短片（各約 60 秒）
-策略是：
-- 節奏快、資訊少、情感強
-- 畫面可 Loop，有記憶點
-- 亮點主題化：一句話、一個地方、一個味道就能傳播
-讓生活圈變成可擴散的「都市小亮點」。`,
-  },
-  {
-    title: "七、主視覺設計 (Visual Design: A & B)",
-    text: `主視覺設計：兩款不同語氣，傳達同一個概念
-
-A 款：科技光束
-這款比較偏向治理高度，像是新北的底層邏輯可視化。重點是：
-- 生活圈像城市的治理節點
-- 彼此靠制度、交通、政策串成一個整體
-- 山海漸層呈現新北的自然底蘊
-- 光束象徵治理能量的流動
-看起來更「智慧城市」、更未來感。
-
-B 款：霓虹幾何
-這款則更貼近市民、更可愛。
-我們把城市想像成一張可以隨時探索的「小旅行地圖」：霓虹線條、柔和漸層、地標變成趣味圖示，每個生活圈都有自己的亮點，像遊戲地圖一樣被點亮。
-這款很適合短影音、社群貼文、宣傳素材，因為它能最直接表達：「新北的每一天，都有可能亮起一個小樂趣。」`,
-  },
-  {
-    title: "八、結語 (Conclusion)",
-    text: `結語：城市正在進行式，而我們都在其中
-
-最後，我想用一句話做收尾：
-城市不是政策構成的，而是被生活推動的。
-我們希望透過這套影像企劃，讓市民看見——那些看似分散的建設、文化、自然，其實都在同一張生活網絡裡，一起推動著新北的現在進行式。
-謝謝大家。`,
-  },
-];
-
-// Combine the initial segments into a single raw script using the '---' separator
-const INITIAL_RAW_SCRIPT = INITIAL_SCRIPT_SEGMENTS.map(s => s.text).join('\n---\n');
-
-const API_MODEL = "gemini-2.5-flash-preview-09-2025";
-const TTS_MODEL = "gemini-2.5-flash-preview-tts";
-const API_KEY = ""; // Use provided API key placeholder
-
-const App = () => {
-  const [currentSegmentIndex, setCurrentSegmentIndex] = useState(0);
-  const [critique, setCritique] = useState(null);
-  const [isLoadingCritique, setIsLoadingCritique] = useState(false);
-  
-  // Script Editing States
-  const [isEditing, setIsEditing] = useState(false);
-  const [rawScript, setRawScript] = useState(INITIAL_RAW_SCRIPT);
-  const [dynamicSegments, setDynamicSegments] = useState([]);
-  
-  // TTS State
-  const [isLoadingTts, setIsLoadingTts] = useState(false);
-  const [ttsAudioUrl, setTtsAudioUrl] = useState(null);
-  const audioRef = useRef(null);
-
-  // Recording State
-  const [isRecording, setIsRecording] = useState(false);
-  const [recordedAudioUrl, setRecordedAudioUrl] = useState(null);
-  const mediaRecorderRef = useRef(null);
-  const audioChunksRef = useRef([]);
-
-  // Process raw script into dynamic segments when rawScript changes
-  useEffect(() => {
-    // Split by '---' surrounded by optional whitespace and newlines
-    const parts = rawScript.split(/\n---\n|\n---\r\n/);
-    const newSegments = parts.map((part, index) => {
-        const trimmedPart = part.trim();
-        const firstLine = trimmedPart.split('\n')[0];
-        
-        let title = `段落 ${index + 1}`;
-        if (firstLine && firstLine.length > 0) {
-             // Use a portion of the first line as a title hint
-             title = firstLine.substring(0, 30) + (firstLine.length > 30 ? '...' : '');
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>提案講稿朗讀教練</title>
+    <!-- 載入 Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* 自定義 Markdown 樣式以配合 Tailwind */
+        .markdown-body {
+            /* 模擬 prose 樣式 */
+            line-height: 1.75;
         }
-        
-        return {
-            title: `${index + 1}. ${title}`,
-            text: trimmedPart
-        };
-    }).filter(s => s.text.length > 0);
-
-    setDynamicSegments(newSegments);
-    // Reset to first segment whenever script changes
-    setCurrentSegmentIndex(0);
-    setCritique(null);
-    setTtsAudioUrl(null);
-    setRecordedAudioUrl(null);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rawScript]);
-  
-  // Get the current segment safely
-  const currentSegment = dynamicSegments[currentSegmentIndex] || { title: "無內容", text: "請點擊編輯按鈕新增講稿內容。" };
-
-  // Reset audio and critique when switching segments
-  useEffect(() => {
-    setCritique(null);
-    setTtsAudioUrl(null);
-    setRecordedAudioUrl(null);
-    setIsRecording(false);
-    if (audioRef.current) {
-        audioRef.current.pause();
-        audioRef.current.src = "";
-    }
-  }, [currentSegmentIndex]);
-
-  // Function to simulate exponential backoff for API calls
-  const backoffFetch = useCallback(async (url, options, maxRetries = 5) => {
-    let delay = 1000;
-    for (let i = 0; i < maxRetries; i++) {
-      try {
-        const response = await fetch(url, options);
-        if (!response.ok) {
-          throw new Error('HTTP error! status: ' + response.status);
+        .markdown-body h2 {
+            font-size: 1.5rem;
+            font-weight: 700;
+            margin-top: 1.5em;
+            margin-bottom: 0.5em;
+            border-bottom: 2px solid #e5e7eb;
+            padding-bottom: 0.25em;
         }
-        return response;
-      } catch (error) {
-        if (i === maxRetries - 1) throw error;
-        await new Promise(resolve => setTimeout(resolve, delay));
-        delay *= 2;
-      }
-    }
-  }, []);
-
-  // --- TTS Functionality ---
-
-  const fetchTTSAndPlay = useCallback(async () => {
-    if (isLoadingTts || dynamicSegments.length === 0) return;
-
-    // If audio is already generated and paused, just play it
-    if (ttsAudioUrl) {
-        audioRef.current.play();
-        return;
-    }
-
-    setIsLoadingTts(true);
-    setTtsAudioUrl(null);
-    
-    // Use a firm, professional voice (Kore) and Chinese (zh-TW) is auto-detected
-    const ttsPayload = {
-      contents: [{
-        parts: [{ text: currentSegment.text }]
-      }],
-      generationConfig: {
-        responseModalities: ["AUDIO"],
-        speechConfig: {
-          voiceConfig: {
-            prebuiltVoiceConfig: { voiceName: "Kore" }
-          }
+        .markdown-body h3 {
+            font-size: 1.25rem;
+            font-weight: 600;
+            margin-top: 1.5em;
+            margin-bottom: 0.5em;
+            color: #111827; /* gray-900 */
         }
-      },
-      model: TTS_MODEL
-    };
-
-    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${TTS_MODEL}:generateContent?key=${API_KEY}`;
-
-    try {
-      const response = await backoffFetch(apiUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(ttsPayload)
-      });
-      
-      const result = await response.json();
-      const part = result?.candidates?.[0]?.content?.parts?.[0];
-      const audioData = part?.inlineData?.data;
-      const mimeType = part?.inlineData?.mimeType;
-
-      if (audioData && mimeType && mimeType.startsWith("audio/L16")) {
-        // Extract sample rate from mimeType, default to 16000 if extraction fails
-        const rateMatch = mimeType.match(/rate=(\d+)/);
-        const sampleRate = rateMatch ? parseInt(rateMatch[1], 10) : 16000;
-
-        const pcmData = base64ToArrayBuffer(audioData);
-        const pcm16 = new Int16Array(pcmData);
-        const wavBlob = pcmToWav(pcm16, sampleRate);
-        const url = URL.createObjectURL(wavBlob);
-        
-        setTtsAudioUrl(url);
-        if (audioRef.current) {
-            audioRef.current.src = url;
-            audioRef.current.play();
+        .markdown-body p, .markdown-body ul, .markdown-body ol {
+            margin-top: 1em;
+            margin-bottom: 1em;
         }
-      } else {
-        alert("TTS服務失敗：無法取得音訊資料或音訊格式不正確。");
-      }
-    } catch (error) {
-      console.error("TTS API Call Error:", error);
-      alert("TTS服務連線錯誤。請稍後再試。");
-    } finally {
-      setIsLoadingTts(false);
-    }
-  }, [currentSegment, ttsAudioUrl, isLoadingTts, backoffFetch, dynamicSegments.length]);
+        .markdown-body ul {
+            list-style: disc;
+            padding-left: 1.5em;
+        }
+        .markdown-body ol {
+            list-style: decimal;
+            padding-left: 1.5em;
+        }
+        .markdown-body pre {
+            background-color: #f3f4f6;
+            padding: 1em;
+            border-radius: 0.5rem;
+            overflow-x: auto;
+        }
+    </style>
+</head>
+<body class="min-h-screen bg-gray-50 p-4 sm:p-8 font-sans">
 
-  // --- Recording Functionality ---
-
-  const startRecording = async () => {
-    if (isRecording || dynamicSegments.length === 0) return;
-    
-    setRecordedAudioUrl(null);
-    audioChunksRef.current = [];
-    
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const recorder = new MediaRecorder(stream);
-      
-      recorder.ondataavailable = (event) => {
-        audioChunksRef.current.push(event.data);
-      };
-      
-      recorder.onstop = () => {
-        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/wav' }); // Using wav for better compatibility
-        const audioUrl = URL.createObjectURL(audioBlob);
-        setRecordedAudioUrl(audioUrl);
-        
-        // Stop all tracks on the stream
-        stream.getTracks().forEach(track => track.stop());
-      };
-      
-      recorder.start();
-      mediaRecorderRef.current = recorder;
-      setIsRecording(true);
-      
-    } catch (err) {
-      console.error('Recording error:', err);
-      alert('無法存取麥克風。請檢查瀏覽器權限設置。');
-      setIsRecording(false);
-    }
-  };
-
-  const stopRecording = () => {
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
-      mediaRecorderRef.current.stop();
-      setIsRecording(false);
-    }
-  };
-
-  const playRecordedAudio = () => {
-    if (recordedAudioUrl) {
-      const recordedAudio = new Audio(recordedAudioUrl);
-      recordedAudio.play();
-    }
-  };
-
-
-  // --- Critique Functionality (Original) ---
-
-  const fetchCritique = useCallback(async () => {
-    if (dynamicSegments.length === 0) return;
-
-    setIsLoadingCritique(true);
-    setCritique(null);
-
-    const systemPrompt = `你是一位專業的簡報提案與公眾演說教練，專門為政府或企業高層提供簡報指導。
-你的回饋必須客觀、專業、且結構清晰，著重於提升講者對聽眾的影響力。
-請使用繁體中文。
-請針對以下講稿段落，提供兩大類別的回饋：\n1. 口氣/語調建議 (Tone/Delivery)\n2. 清晰度/重點提煉 (Clarity/Focus)\n\n請將回饋內容以 Markdown 格式輸出，結構如下：
-## 💡 專業回饋
-### 🗣️ 口氣/語調建議 (Tone/Delivery)
-(提供具體的語速、停頓、情感起伏的建議，例如在哪句話應該慢下來、哪裡要加重語氣來強調)\n\n### 🎯 清晰度/重點提煉 (Clarity/Focus)
-(分析該段落的邏輯結構是否清晰，並建議如何用更精準的語言或更強烈的說服力來表達，讓聽眾更容易掌握核心要點)`;
-
-    const userQuery = `請根據我提供的系統指示，為以下簡報段落提供專業回饋：
-\`\`\`
-${currentSegment.text}
-\`\`\`
-`;
-
-    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${API_MODEL}:generateContent?key=${API_KEY}`;
-
-    const payload = {
-      contents: [{ parts: [{ text: userQuery }] }],
-      systemInstruction: { parts: [{ text: systemPrompt }] },
-    };
-
-    try {
-      const response = await backoffFetch(apiUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-
-      const result = await response.json();
-      const text = result.candidates?.[0]?.content?.parts?.[0]?.text || "抱歉，無法取得回饋。請再試一次。";
-      setCritique(text);
-
-    } catch (error) {
-      console.error("API Call Error:", error);
-      setCritique("系統錯誤：無法連接到回饋服務。請檢查連線或稍後再試。");
-    } finally {
-      setIsLoadingCritique(false);
-    }
-  }, [currentSegment, backoffFetch, dynamicSegments.length]);
-
-  const goToNext = () => {
-    setCurrentSegmentIndex((prev) => Math.min(prev + 1, dynamicSegments.length - 1));
-  };
-
-  const goToPrev = () => {
-    setCurrentSegmentIndex((prev) => Math.max(prev - 1, 0));
-  };
-
-  return (
-    <div className="min-h-screen bg-gray-50 p-4 sm:p-8 font-sans">
-      <div className="max-w-4xl mx-auto">
-        <header className="mb-8 border-b pb-4">
-          <h1 className="text-3xl font-extrabold text-blue-800 flex items-center">
-            <BookOpen className="w-6 h-6 mr-3 text-blue-500" />
-            提案講稿朗讀教練
-          </h1>
-          <p className="text-gray-600 mt-1">請利用播放功能聆聽建議的語氣，然後錄製您自己的版本，最後點擊「取得回饋」。</p>
-        </header>
-
-        {/* Toggle Editor Button */}
-        <div className="flex justify-end mb-4">
-          <button
-            onClick={() => setIsEditing(!isEditing)}
-            className={`flex items-center px-4 py-2 text-sm font-semibold rounded-full transition duration-150 ${
-                isEditing ? 'bg-red-500 hover:bg-red-600 text-white shadow-md' : 'bg-white text-gray-700 hover:bg-gray-100 border border-gray-300 shadow-md'
-            }`}
-          >
-            {isEditing ? (
-              <>
-                <Save className="w-4 h-4 mr-2" />
-                儲存並退出編輯
-              </>
-            ) : (
-              <>
-                <Edit2 className="w-4 h-4 mr-2" />
-                編輯所有講稿
-              </>
-            )}
-          </button>
-        </div>
-        
-        {/* Script Editor View */}
-        {isEditing && (
-             <div className="bg-white p-6 rounded-xl shadow-2xl mb-8 border-t-4 border-red-500">
-                <h2 className="text-xl font-bold mb-3 text-gray-700">講稿編輯區</h2>
-                <p className="text-sm text-red-500 mb-4">請用 **<span className="font-mono">---</span>** (三個橫線，單獨一行) 作為不同練習段落之間的分隔符。</p>
-                <textarea
-                    value={rawScript}
-                    onChange={(e) => setRawScript(e.target.value)}
-                    rows={20}
-                    className="w-full p-4 border border-gray-300 rounded-lg font-mono text-sm focus:ring-blue-500 focus:border-blue-500 resize-y"
-                    placeholder="在此輸入您的完整講稿，並用 --- 分隔段落..."
-                />
-            </div>
-        )}
-
-        {/* Presentation Practice View */}
-        {!isEditing && (
-            <>
-                {/* Segment Navigation */}
-                <div className="flex justify-between items-center mb-6 p-4 bg-white rounded-xl shadow-lg border border-blue-100">
-                    <button
-                        onClick={goToPrev}
-                        disabled={currentSegmentIndex === 0 || isLoadingTts || isRecording || dynamicSegments.length === 0}
-                        className={`p-2 rounded-full transition duration-150 ${currentSegmentIndex === 0 || isLoadingTts || isRecording || dynamicSegments.length === 0 ? 'bg-gray-200 text-gray-400 cursor-not-allowed' : 'bg-blue-500 hover:bg-blue-600 text-white shadow-md'}`}
-                        aria-label="上一段"
-                    >
-                        <ArrowLeft className="w-5 h-5" />
-                    </button>
-
-                    <div className="text-center font-semibold text-gray-700 max-w-sm overflow-hidden whitespace-nowrap text-ellipsis">
-                        {currentSegment.title}
-                        <span className="block text-sm font-medium text-blue-600 mt-1">
-                            第 {currentSegmentIndex + 1} / {dynamicSegments.length} 段
-                        </span>
-                    </div>
-
-                    <button
-                        onClick={goToNext}
-                        disabled={currentSegmentIndex === dynamicSegments.length - 1 || isLoadingTts || isRecording || dynamicSegments.length === 0}
-                        className={`p-2 rounded-full transition duration-150 ${currentSegmentIndex === dynamicSegments.length - 1 || isLoadingTts || isRecording || dynamicSegments.length === 0 ? 'bg-gray-200 text-gray-400 cursor-not-allowed' : 'bg-blue-500 hover:bg-blue-600 text-white shadow-md'}`}
-                        aria-label="下一段"
-                    >
-                        <ArrowRight className="w-5 h-5" />
-                    </button>
-                </div>
-
-                {/* Script Content Area */}
-                <div className="bg-white p-6 rounded-xl shadow-xl border-l-4 border-blue-500 mb-8">
-                    <div className="whitespace-pre-wrap text-lg leading-relaxed text-gray-800">
-                        {currentSegment.text}
-                    </div>
-                </div>
-
-                {/* Audio Controls and Critique Button */}
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
-                    
-                    {/* TTS Playback */}
-                    <div className="flex flex-col space-y-2">
-                        <button
-                            onClick={fetchTTSAndPlay}
-                            disabled={isLoadingTts || isRecording || dynamicSegments.length === 0}
-                            className="flex items-center justify-center px-4 py-3 bg-indigo-500 text-white font-bold rounded-full shadow-md hover:bg-indigo-600 transition disabled:opacity-50"
-                        >
-                            {isLoadingTts ? (
-                                <>
-                                    <Loader2 className="w-5 h-5 mr-2 animate-spin" />
-                                    生成語音中...
-                                </>
-                            ) : (
-                                <>
-                                    <Volume2 className="w-5 h-5 mr-2" />
-                                    播放講稿
-                                </>
-                            )}
-                        </button>
-                        <p className="text-xs text-gray-500 text-center">聆聽講稿的建議語氣與節奏。</p>
-                        <audio ref={audioRef} onEnded={() => audioRef.current.pause()} className="hidden"></audio>
-                    </div>
-
-                    {/* Recording Controls */}
-                    <div className="flex flex-col space-y-2">
-                        {!isRecording ? (
-                            <button
-                                onClick={startRecording}
-                                disabled={isLoadingTts || dynamicSegments.length === 0}
-                                className="flex items-center justify-center px-4 py-3 bg-red-500 text-white font-bold rounded-full shadow-md hover:bg-red-600 transition disabled:opacity-50"
-                            >
-                                <Mic className="w-5 h-5 mr-2" />
-                                開始錄音
-                            </button>
-                        ) : (
-                            <button
-                                onClick={stopRecording}
-                                className="flex items-center justify-center px-4 py-3 bg-red-700 text-white font-bold rounded-full shadow-md hover:bg-red-800 transition"
-                            >
-                                <StopCircle className="w-5 h-5 mr-2 animate-pulse" />
-                                停止錄音 ({' '}
-                                <span className="font-mono">
-                                    錄音中...
-                                </span>
-                                )
-                            </button>
-                        )}
-                        <p className="text-xs text-gray-500 text-center">錄製您的版本進行自我比較。</p>
-                        {recordedAudioUrl && (
-                            <button
-                                onClick={playRecordedAudio}
-                                className="flex items-center justify-center text-sm px-2 py-1 bg-gray-200 text-gray-800 rounded-lg hover:bg-gray-300"
-                            >
-                                <Play className="w-4 h-4 mr-1" /> 播放您的錄音
-                            </button>
-                        )}
-                    </div>
-
-                    {/* Critique Button */}
-                    <div className="flex flex-col space-y-2">
-                        <button
-                            onClick={fetchCritique}
-                            disabled={isLoadingCritique || isRecording || dynamicSegments.length === 0}
-                            className="flex items-center justify-center px-4 py-3 bg-gradient-to-r from-teal-400 to-blue-500 text-white font-bold rounded-full shadow-lg hover:shadow-xl transform hover:scale-105 transition duration-300 disabled:opacity-50 disabled:cursor-not-allowed"
-                        >
-                            {isLoadingCritique ? (
-                                <>
-                                    <Loader2 className="w-5 h-5 mr-2 animate-spin" />
-                                    教練思考中...
-                                </>
-                            ) : (
-                                <>
-                                    <Zap className="w-5 h-5 mr-2" />
-                                    取得專業回饋
-                                </>
-                            )}
-                        </button>
-                        <p className="text-xs text-gray-500 text-center">模擬專業簡報教練提供文字建議。</p>
-                    </div>
-                </div>
-
-                {/* Critique Result Area */}
-                {critique && (
-                    <div className="bg-white p-6 rounded-xl shadow-2xl ring-4 ring-teal-200">
-                        <ReactMarkdown className="markdown-body prose max-w-none">
-                            {critique}
-                        </ReactMarkdown>
-                    </div>
-                )}
-            </>
-        )}
-      </div>
+    <div id="app" class="max-w-4xl mx-auto">
+        <!-- 應用程式內容將由 JavaScript 渲染 -->
     </div>
-  );
-};
 
-export default App;
+    <script>
+        // --- 內嵌圖示 (Lucide Icons as SVG) ---
+        const ICON_SVG = {
+            BookOpen: `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>`,
+            ArrowLeft: `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 19-7-7 7-7"/><path d="M19 12H5"/></svg>`,
+            ArrowRight: `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>`,
+            Volume2: `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>`,
+            Mic: `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/></svg>`,
+            StopCircle: `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><rect width="6" height="6" x="9" y="9"/></svg>`,
+            Play: `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>`,
+            Zap: `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>`,
+            Loader2: `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>`,
+            Edit2: `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>`,
+            Save: `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z"/><path d="M17 21v-8H7v8"/><path d="M7 3v4"/></svg>`,
+        };
+
+        // --- 初始講稿資料 (Initial Script Data) ---
+
+        const INITIAL_SCRIPT_SEGMENTS = [
+          { title: "一、開場與核心論點 (Opening & Thesis)", text: `各位長官大家好，今天想跟大家分享的是：我們如何用 11 個共同生活圈，重新把「治理」講成「生活」。\n因為我們這次的影像企劃，目標不是做城市介紹，而是把新北的治理，用更貼近居民的方法說出來。一句話總結就是：\n新北，不只是一座城市，而是一張正在呼吸的生活網絡。` },
+          { title: "二、生活圈的必要性 (Justification)", text: `為什麼要用共同生活圈？\n\n過去我們看城市，習慣用行政區來理解。但真實生活不是這樣運作的——市民不是沿著行政界線生活，而是沿著交通、需求、日常習慣、生活軸線在移動。\n例如市民會說：\n- 「我早上搭輕軌去上班」\n- 「中午去河濱吃飯」\n- 「週末去海邊散步」\n這些，其實就是生活圈真正的邊界。\n因此，11 個共同生活圈不是新的名詞，而是把城市照著生活方式重新分類。每一圈都有自己獨特的節奏，也有不同的治理需求。` },
+          { title: "三、影片敘事模型 (Narrative Model: Man, Movement, Vision)", text: `影片的核心敘事：從人、到移動、到願景\n\n為了讓 11 支影片都有一致的結構，我們設計了一套非常清楚的敘事模型：\n\n第一層：人物（點）——故事從在地人開始\n每一支影片會由一位「生活導覽員」帶路。不一定是名人，而是：\n- 回鄉青年\n- 工匠、職人\n- 長期在地耕耘的人\n- 或某個生活圈的典型角色\n他們的語氣、眼睛看到的世界，就是影片進入那個生活圈的入口。\n\n第二層：移動（線）——看生活如何被連起來\n接著會進入「線」。\n輕軌、捷運、渡船、步道、自行車道……這些公共建設不是冷冰冰的交通工具，而是生活在流動的方式。\n透過移動，我們能讓觀眾感受到：\n- 工作與生活怎麼串起來\n- 城鄉節奏如何交會\n- 各生活圈之間真正的「距離感」\n線其實就是生活的節奏。\n\n第三層：治理（面）——城市的願景與底層邏輯\n最外層，我們才帶回治理。\n但我們不會用工程講工程，而是透過生活來講：\n「這個建設怎麼影響大家的日常？」「這件事讓生活變得更安全、更永續了嗎？」\n像海岸防災、坡地治理、環境永續、水梯田復育……這些都不是政策標語，而是生活得以更穩定的「底層支撐」。` },
+          { title: "四、影片內容範例 (Video Content Example)", text: `一支影片會呈現的面向（以生活圈範例概述）\n\n我這邊不會細講完整腳本，而是讓大家理解一支生活圈影片的「組成」。\n影片通常會包含這些元素：\n- 生活導覽員的個人故事與在地感受\n- 這個生活圈的日常畫面與特色節奏\n- 交通移動、如何讓生活被串聯起來\n- 地方的風味文化與生活記憶點\n- 治理建設與永續的實質影響\n例如在北海岸生活圈，我們可能會讓觀眾感受到：\n- 一天的節奏如何從海邊、山邊一路串起來\n- 當地產業與觀光如何共存\n- 交通建設如何讓城市的距離變小\n- 海岸保育與觀光永續如何一起運作\n重點不是介紹哪一個地點，而是讓觀眾感受到這個生活圈「生活起來是什麼感覺」。` },
+          { title: "五、整體宣傳影片 (Overall Campaign Video)", text: `整體宣傳影片：城市網絡的全景\n\n除了 11 支生活圈影片，我們會再拍一支整體宣傳影片。\n它的定位會比較像是一支「城市預告片」，從更高的角度，把 11 種節奏串成一張完整的新北生活網絡。\n這支影片要讓觀眾明白三件事：\n1. 新北是一個多節奏、多核心的城市網絡\n2. 治理不是抽象政策，而是每天看得到的改變\n3. 城市正在進行式，11 種生活節奏一起向前走\n整體宣傳影片會搭配市長訪談、市民短訪、地景畫面、治理成果與生活日常。讓「城市治理」真正變成「每個人都能理解的生活故事」。` },
+          { title: "六、短影音策略 (Short Video Strategy)", text: `短影音策略：讓生活圈在社群裡自然亮起來\n\n在 IG、抖音與 Shorts 的部分，我們會把影片拆成：\n- 一支整體精華短版\n- 11 支生活圈的獨立亮點短片（各約 60 秒）\n策略是：\n- 節奏快、資訊少、情感強\n- 畫面可 Loop，有記憶點\n- 亮點主題化：一句話、一個地方、一個味道就能傳播\n讓生活圈變成可擴散的「都市小亮點」。` },
+          { title: "七、主視覺設計 (Visual Design: A & B)", text: `主視覺設計：兩款不同語氣，傳達同一個概念\n\nA 款：科技光束\n這款比較偏向治理高度，像是新北的底層邏輯可視化。重點是：\n- 生活圈像城市的治理節點\n- 彼此靠制度、交通、政策串成一個整體\n- 山海漸層呈現新北的自然底蘊\n- 光束象徵治理能量的流動\n看起來更「智慧城市」、更未來感。\n\nB 款：霓虹幾何\n這款則更貼近市民、更可愛。\n我們把城市想像成一張可以隨時探索的「小旅行地圖」：霓虹線條、柔和漸層、地標變成趣味圖示，每個生活圈都有自己的亮點，像遊戲地圖一樣被點亮。\n這款很適合短影音、社群貼文、宣傳素材，因為它能最直接表達：「新北的每一天，都有可能亮起一個小樂趣。」` },
+          { title: "八、結語 (Conclusion)", text: `結語：城市正在進行式，而我們都在其中\n\n最後，我想用一句話做收尾：\n城市不是政策構成的，而是被生活推動的。\n我們希望透過這套影像企劃，讓市民看見——那些看似分散的建設、文化、自然，其實都在同一張生活網絡裡，一起推動著新北的現在進行式。\n謝謝大家。` },
+        ];
+        
+        const INITIAL_RAW_SCRIPT = INITIAL_SCRIPT_SEGMENTS.map(s => s.text).join('\n---\n');
+
+        const API_MODEL = "gemini-2.5-flash-preview-09-2025";
+        const TTS_MODEL = "gemini-2.5-flash-preview-tts";
+        const API_KEY = ""; // Canvas environment will provide the key
+
+        // --- 狀態變數 (State Variables) ---
+        let currentSegmentIndex = 0;
+        let isEditing = false;
+        let rawScript = INITIAL_RAW_SCRIPT;
+        let dynamicSegments = [];
+        let critique = null;
+        let isLoadingCritique = false;
+        let isLoadingTts = false;
+        let isRecording = false;
+        let ttsAudio = new Audio();
+        let recordedAudioUrl = null;
+        let mediaRecorder = null;
+        let audioChunks = [];
+        
+        // --- 核心工具函數 (Utility Functions) ---
+
+        /** 轉換 Base64 字串到 ArrayBuffer */
+        const base64ToArrayBuffer = (base64) => {
+            const binaryString = atob(base64);
+            const len = binaryString.length;
+            const bytes = new Uint8Array(len);
+            for (let i = 0; i < len; i++) {
+                bytes[i] = binaryString.charCodeAt(i);
+            }
+            return bytes.buffer;
+        };
+
+        /** 寫入字串到 DataView */
+        const writeString = (view, offset, string) => {
+            for (let i = 0; i < string.length; i++) {
+                view.setUint8(offset + i, string.charCodeAt(i));
+            }
+        };
+
+        /** 將 PCM 16-bit 音訊資料轉換為 WAV Blob */
+        const pcmToWav = (pcm16, sampleRate) => {
+            const numChannels = 1;
+            const numSamples = pcm16.length;
+            const buffer = new ArrayBuffer(44 + numSamples * 2);
+            const view = new DataView(buffer);
+            let offset = 0;
+
+            // RIFF identifier
+            writeString(view, offset, 'RIFF'); offset += 4;
+            // file length
+            view.setUint32(offset, 36 + numSamples * 2, true); offset += 4;
+            // RIFF type
+            writeString(view, offset, 'WAVE'); offset += 4;
+            // format chunk identifier
+            writeString(view, offset, 'fmt '); offset += 4;
+            // format chunk length
+            view.setUint32(offset, 16, true); offset += 4;
+            // sample format (1 = PCM)
+            view.setUint16(offset, 1, true); offset += 2;
+            // number of channels
+            view.setUint16(offset, numChannels, true); offset += 2;
+            // sample rate
+            view.setUint32(offset, sampleRate, true); offset += 4;
+            // byte rate (sample rate * block align)
+            view.setUint32(offset, sampleRate * 2, true); offset += 4;
+            // block align (num channels * bytes per sample)
+            view.setUint16(offset, numChannels * 2, true); offset += 2;
+            // bits per sample
+            view.setUint16(offset, 16, true); offset += 2;
+            // data chunk identifier
+            writeString(view, offset, 'data'); offset += 4;
+            // data chunk length
+            view.setUint32(offset, numSamples * 2, true); offset += 4;
+
+            // write PCM data
+            for (let i = 0; i < numSamples; i++) {
+                view.setInt16(offset, pcm16[i], true);
+                offset += 2;
+            }
+
+            return new Blob([view], { type: 'audio/wav' });
+        };
+
+        /** 模擬指數退避的 Fetch 函數 */
+        async function backoffFetch(url, options, maxRetries = 5) {
+            let delay = 1000;
+            for (let i = 0; i < maxRetries; i++) {
+                try {
+                    const response = await fetch(url, options);
+                    if (!response.ok) {
+                        throw new Error('HTTP error! status: ' + response.status);
+                    }
+                    return response;
+                } catch (error) {
+                    if (i === maxRetries - 1) throw error;
+                    await new Promise(resolve => setTimeout(resolve, delay));
+                    delay *= 2;
+                }
+            }
+        }
+
+        // --- 講稿處理邏輯 (Script Processing) ---
+
+        /** 將原始講稿分割為段落 */
+        function processScript(script) {
+            const parts = script.split(/\n---\n|\n---\r\n/);
+            return parts.map((part, index) => {
+                const trimmedPart = part.trim();
+                if (trimmedPart.length === 0) return null;
+                
+                const firstLine = trimmedPart.split('\n')[0];
+                let title = `段落 ${index + 1}`;
+                if (firstLine && firstLine.length > 0) {
+                    title = firstLine.substring(0, 30) + (firstLine.length > 30 ? '...' : '');
+                }
+                
+                return {
+                    title: `${index + 1}. ${title}`,
+                    text: trimmedPart
+                };
+            }).filter(s => s !== null);
+        }
+
+        /** 取得當前段落資料 */
+        function getCurrentSegment() {
+            return dynamicSegments[currentSegmentIndex] || { title: "無內容", text: "請點擊編輯按鈕新增講稿內容。" };
+        }
+
+        // --- 核心功能 (Core Features) ---
+
+        /** 播放 TTS 語音 */
+        async function fetchTTSAndPlay() {
+            if (isLoadingTts || dynamicSegments.length === 0) return;
+
+            // 如果音訊已存在，則直接播放
+            if (ttsAudio.src) {
+                ttsAudio.play();
+                return;
+            }
+
+            isLoadingTts = true;
+            renderApp(); // 更新 UI 顯示載入狀態
+
+            const currentSegment = getCurrentSegment();
+            const ttsPayload = {
+                contents: [{
+                    parts: [{ text: currentSegment.text }]
+                }],
+                generationConfig: {
+                    responseModalities: ["AUDIO"],
+                    speechConfig: {
+                        voiceConfig: {
+                            prebuiltVoiceConfig: { voiceName: "Kore" }
+                        }
+                    }
+                },
+                model: TTS_MODEL
+            };
+
+            const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${TTS_MODEL}:generateContent?key=${API_KEY}`;
+
+            try {
+                const response = await backoffFetch(apiUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(ttsPayload)
+                });
+                
+                const result = await response.json();
+                const part = result?.candidates?.[0]?.content?.parts?.[0];
+                const audioData = part?.inlineData?.data;
+                const mimeType = part?.inlineData?.mimeType;
+
+                if (audioData && mimeType && mimeType.startsWith("audio/L16")) {
+                    const rateMatch = mimeType.match(/rate=(\d+)/);
+                    const sampleRate = rateMatch ? parseInt(rateMatch[1], 10) : 16000;
+
+                    const pcmData = base64ToArrayBuffer(audioData);
+                    const pcm16 = new Int16Array(pcmData);
+                    const wavBlob = pcmToWav(pcm16, sampleRate);
+                    const url = URL.createObjectURL(wavBlob);
+                    
+                    ttsAudio.src = url;
+                    ttsAudio.play();
+                } else {
+                    alert("TTS服務失敗：無法取得音訊資料或音訊格式不正確。");
+                }
+            } catch (error) {
+                console.error("TTS API Call Error:", error);
+                alert("TTS服務連線錯誤。請稍後再試。");
+            } finally {
+                isLoadingTts = false;
+                renderApp(); // 結束載入狀態
+            }
+        }
+
+        /** 開始錄音 */
+        async function startRecording() {
+            if (isRecording || dynamicSegments.length === 0) return;
+            
+            recordedAudioUrl = null;
+            audioChunks = [];
+            
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                // 建議使用 'audio/wav' 或 'audio/webm' 類型
+                const options = { mimeType: 'audio/webm' };
+                const recorder = new MediaRecorder(stream, options);
+                
+                recorder.ondataavailable = (event) => {
+                    audioChunks.push(event.data);
+                };
+                
+                recorder.onstop = () => {
+                    const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+                    recordedAudioUrl = URL.createObjectURL(audioBlob);
+                    
+                    stream.getTracks().forEach(track => track.stop());
+                    renderApp(); // 更新 UI 顯示播放錄音按鈕
+                };
+                
+                recorder.start();
+                mediaRecorder = recorder;
+                isRecording = true;
+                renderApp();
+                
+            } catch (err) {
+                console.error('Recording error:', err);
+                alert('無法存取麥克風。請檢查瀏覽器權限設置。');
+                isRecording = false;
+                renderApp();
+            }
+        }
+
+        /** 停止錄音 */
+        function stopRecording() {
+            if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+                mediaRecorder.stop();
+                isRecording = false;
+                // UI update will happen in recorder.onstop
+            }
+        }
+
+        /** 播放錄音 */
+        function playRecordedAudio() {
+            if (recordedAudioUrl) {
+                const recordedAudio = new Audio(recordedAudioUrl);
+                recordedAudio.play();
+            }
+        }
+
+        /** 取得 AI 簡報回饋 */
+        async function fetchCritique() {
+            if (isLoadingCritique || isRecording || dynamicSegments.length === 0) return;
+
+            isLoadingCritique = true;
+            critique = null;
+            renderApp();
+
+            const currentSegment = getCurrentSegment();
+
+            const systemPrompt = `你是一位專業的簡報提案與公眾演說教練，專門為政府或企業高層提供簡報指導。你的回饋必須客觀、專業、且結構清晰，著重於提升講者對聽眾的影響力。請使用繁體中文。請針對以下講稿段落，提供兩大類別的回饋：\n1. 口氣/語調建議 (Tone/Delivery)\n2. 清晰度/重點提煉 (Clarity/Focus)\n\n請將回饋內容以 Markdown 格式輸出，結構如下：\n## 💡 專業回饋\n### 🗣️ 口氣/語調建議 (Tone/Delivery)\n(提供具體的語速、停頓、情感起伏的建議，例如在哪句話應該慢下來、哪裡要加重語氣來強調)\n\n### 🎯 清晰度/重點提煉 (Clarity/Focus)\n(分析該段落的邏輯結構是否清晰，並建議如何用更精準的語言或更強烈的說服力來表達，讓聽眾更容易掌握核心要點)`;
+
+            const userQuery = `請根據我提供的系統指示，為以下簡報段落提供專業回饋：\n\`\`\`\n${currentSegment.text}\n\`\`\``;
+
+            const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${API_MODEL}:generateContent?key=${API_KEY}`;
+
+            const payload = {
+                contents: [{ parts: [{ text: userQuery }] }],
+                systemInstruction: { parts: [{ text: systemPrompt }] },
+            };
+
+            try {
+                const response = await backoffFetch(apiUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+
+                const result = await response.json();
+                critique = result.candidates?.[0]?.content?.parts?.[0]?.text || "抱歉，無法取得回饋。請再試一次。";
+
+            } catch (error) {
+                console.error("API Call Error:", error);
+                critique = "系統錯誤：無法連接到回饋服務。請檢查連線或稍後再試。";
+            } finally {
+                isLoadingCritique = false;
+                renderApp();
+            }
+        }
+
+        // --- 導航與編輯功能 (Navigation & Editing) ---
+
+        /** 切換到下一段 */
+        function goToNext() {
+            if (currentSegmentIndex < dynamicSegments.length - 1) {
+                currentSegmentIndex++;
+                resetPracticeState();
+                renderApp();
+            }
+        }
+
+        /** 切換到上一段 */
+        function goToPrev() {
+            if (currentSegmentIndex > 0) {
+                currentSegmentIndex--;
+                resetPracticeState();
+                renderApp();
+            }
+        }
+
+        /** 切換編輯模式 */
+        function toggleEditing() {
+            isEditing = !isEditing;
+            if (!isEditing) {
+                // 如果退出編輯，重新處理講稿
+                dynamicSegments = processScript(rawScript);
+                currentSegmentIndex = 0;
+                resetPracticeState();
+            }
+            renderApp();
+        }
+
+        /** 重置練習狀態 */
+        function resetPracticeState() {
+            critique = null;
+            ttsAudio.src = ""; // 停止並清除 TTS 音頻
+            recordedAudioUrl = null;
+            // 確保錄音已停止
+            if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+                mediaRecorder.stop();
+            }
+            isRecording = false;
+        }
+
+        // --- UI 渲染 (UI Rendering) ---
+        
+        /** 渲染應用程式的主函數 */
+        function renderApp() {
+            const appDiv = document.getElementById('app');
+            const currentSegment = getCurrentSegment();
+            const segmentCount = dynamicSegments.length;
+            const currentTitle = currentSegment.title;
+            const currentText = currentSegment.text;
+
+            const nextDisabled = currentSegmentIndex === segmentCount - 1 || isLoadingTts || isRecording || segmentCount === 0;
+            const prevDisabled = currentSegmentIndex === 0 || isLoadingTts || isRecording || segmentCount === 0;
+            const ttsDisabled = isLoadingTts || isRecording || segmentCount === 0;
+            const recordDisabled = isLoadingTts || segmentCount === 0;
+            const critiqueDisabled = isLoadingCritique || isRecording || segmentCount === 0;
+
+            const editorButtonClasses = isEditing 
+                ? 'bg-red-500 hover:bg-red-600 text-white shadow-md' 
+                : 'bg-white text-gray-700 hover:bg-gray-100 border border-gray-300 shadow-md';
+            
+            const nextButtonClasses = `p-2 rounded-full transition duration-150 ${nextDisabled ? 'bg-gray-200 text-gray-400 cursor-not-allowed' : 'bg-blue-500 hover:bg-blue-600 text-white shadow-md'}`;
+            const prevButtonClasses = `p-2 rounded-full transition duration-150 ${prevDisabled ? 'bg-gray-200 text-gray-400 cursor-not-allowed' : 'bg-blue-500 hover:bg-blue-600 text-white shadow-md'}`;
+
+            // 使用模板字串構建 HTML
+            appDiv.innerHTML = `
+                <header class="mb-8 border-b pb-4">
+                    <h1 class="text-3xl font-extrabold text-blue-800 flex items-center">
+                        <span class="w-6 h-6 mr-3 text-blue-500">${ICON_SVG.BookOpen}</span>
+                        提案講稿朗讀教練
+                    </h1>
+                    <p class="text-gray-600 mt-1">請利用播放功能聆聽建議的語氣，然後錄製您自己的版本，最後點擊「取得回饋」。</p>
+                </header>
+
+                <!-- Toggle Editor Button -->
+                <div class="flex justify-end mb-4">
+                    <button id="toggle-edit" class="flex items-center px-4 py-2 text-sm font-semibold rounded-full transition duration-150 ${editorButtonClasses}">
+                        <span class="w-4 h-4 mr-2">${isEditing ? ICON_SVG.Save : ICON_SVG.Edit2}</span>
+                        ${isEditing ? '儲存並退出編輯' : '編輯所有講稿'}
+                    </button>
+                </div>
+                
+                <!-- Script Editor View -->
+                ${isEditing ? `
+                     <div class="bg-white p-6 rounded-xl shadow-2xl mb-8 border-t-4 border-red-500">
+                        <h2 class="text-xl font-bold mb-3 text-gray-700">講稿編輯區</h2>
+                        <p class="text-sm text-red-500 mb-4">請用 <strong><span class="font-mono">---</span></strong> (三個橫線，單獨一行) 作為不同練習段落之間的分隔符。</p>
+                        <textarea
+                            id="raw-script-editor"
+                            rows="20"
+                            class="w-full p-4 border border-gray-300 rounded-lg font-mono text-sm focus:ring-blue-500 focus:border-blue-500 resize-y"
+                            placeholder="在此輸入您的完整講稿，並用 --- 分隔段落..."
+                        >${rawScript}</textarea>
+                    </div>
+                ` : `
+                <!-- Presentation Practice View -->
+                    <!-- Segment Navigation -->
+                    <div class="flex justify-between items-center mb-6 p-4 bg-white rounded-xl shadow-lg border border-blue-100">
+                        <button id="prev-segment" class="${prevButtonClasses}" ${prevDisabled ? 'disabled' : ''} aria-label="上一段">
+                            <span class="w-5 h-5">${ICON_SVG.ArrowLeft}</span>
+                        </button>
+
+                        <div class="text-center font-semibold text-gray-700 max-w-sm overflow-hidden whitespace-nowrap text-ellipsis px-4">
+                            ${currentTitle}
+                            <span class="block text-sm font-medium text-blue-600 mt-1">
+                                第 ${currentSegmentIndex + 1} / ${segmentCount} 段
+                            </span>
+                        </div>
+
+                        <button id="next-segment" class="${nextButtonClasses}" ${nextDisabled ? 'disabled' : ''} aria-label="下一段">
+                            <span class="w-5 h-5">${ICON_SVG.ArrowRight}</span>
+                        </button>
+                    </div>
+
+                    <!-- Script Content Area -->
+                    <div class="bg-white p-6 rounded-xl shadow-xl border-l-4 border-blue-500 mb-8">
+                        <div class="whitespace-pre-wrap text-lg leading-relaxed text-gray-800">
+                            ${currentText}
+                        </div>
+                    </div>
+
+                    <!-- Audio Controls and Critique Button -->
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
+                        
+                        <!-- TTS Playback -->
+                        <div class="flex flex-col space-y-2">
+                            <button id="play-tts" class="flex items-center justify-center px-4 py-3 bg-indigo-500 text-white font-bold rounded-full shadow-md hover:bg-indigo-600 transition disabled:opacity-50" ${ttsDisabled ? 'disabled' : ''}>
+                                ${isLoadingTts ? `
+                                    <span class="w-5 h-5 mr-2 animate-spin">${ICON_SVG.Loader2}</span>
+                                    生成語音中...
+                                ` : `
+                                    <span class="w-5 h-5 mr-2">${ICON_SVG.Volume2}</span>
+                                    播放講稿
+                                `}
+                            </button>
+                            <p class="text-xs text-gray-500 text-center">聆聽講稿的建議語氣與節奏。</p>
+                        </div>
+
+                        <!-- Recording Controls -->
+                        <div class="flex flex-col space-y-2">
+                            ${!isRecording ? `
+                                <button id="start-record" class="flex items-center justify-center px-4 py-3 bg-red-500 text-white font-bold rounded-full shadow-md hover:bg-red-600 transition disabled:opacity-50" ${recordDisabled ? 'disabled' : ''}>
+                                    <span class="w-5 h-5 mr-2">${ICON_SVG.Mic}</span>
+                                    開始錄音
+                                </button>
+                            ` : `
+                                <button id="stop-record" class="flex items-center justify-center px-4 py-3 bg-red-700 text-white font-bold rounded-full shadow-md hover:bg-red-800 transition">
+                                    <span class="w-5 h-5 mr-2 animate-pulse">${ICON_SVG.StopCircle}</span>
+                                    停止錄音 (<span class="font-mono">錄音中...</span>)
+                                </button>
+                            `}
+                            <p class="text-xs text-gray-500 text-center">錄製您的版本進行自我比較。</p>
+                            ${recordedAudioUrl ? `
+                                <button id="play-recorded" class="flex items-center justify-center text-sm px-2 py-1 bg-gray-200 text-gray-800 rounded-lg hover:bg-gray-300">
+                                    <span class="w-4 h-4 mr-1">${ICON_SVG.Play}</span> 播放您的錄音
+                                </button>
+                            ` : ''}
+                        </div>
+
+                        <!-- Critique Button -->
+                        <div class="flex flex-col space-y-2">
+                            <button id="get-critique" class="flex items-center justify-center px-4 py-3 bg-gradient-to-r from-teal-400 to-blue-500 text-white font-bold rounded-full shadow-lg hover:shadow-xl transform hover:scale-105 transition duration-300 disabled:opacity-50 disabled:cursor-not-allowed" ${critiqueDisabled ? 'disabled' : ''}>
+                                ${isLoadingCritique ? `
+                                    <span class="w-5 h-5 mr-2 animate-spin">${ICON_SVG.Loader2}</span>
+                                    教練思考中...
+                                ` : `
+                                    <span class="w-5 h-5 mr-2">${ICON_SVG.Zap}</span>
+                                    取得專業回饋
+                                `}
+                            </button>
+                            <p class="text-xs text-gray-500 text-center">模擬專業簡報教練提供文字建議。</p>
+                        </div>
+                    </div>
+
+                    <!-- Critique Result Area -->
+                    ${critique ? `
+                        <div class="bg-white p-6 rounded-xl shadow-2xl ring-4 ring-teal-200">
+                            <div class="markdown-body">
+                                ${critique.split('\n').map(line => {
+                                    // 簡單的 Markdown 渲染 (僅處理 H2, H3)
+                                    if (line.startsWith('## ')) return `<h2>${line.substring(3).trim()}</h2>`;
+                                    if (line.startsWith('### ')) return `<h3>${line.substring(4).trim()}</h3>`;
+                                    return `<p>${line.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')}</p>`; // 簡單粗體
+                                }).join('')}
+                            </div>
+                        </div>
+                    ` : ''}
+                `}
+            `;
+
+            // --- 註冊事件監聽器 (Event Listeners) ---
+            
+            document.getElementById('toggle-edit')?.addEventListener('click', toggleEditing);
+
+            if (isEditing) {
+                document.getElementById('raw-script-editor')?.addEventListener('input', (e) => {
+                    rawScript = e.target.value;
+                });
+            } else {
+                document.getElementById('prev-segment')?.addEventListener('click', goToPrev);
+                document.getElementById('next-segment')?.addEventListener('click', goToNext);
+                document.getElementById('play-tts')?.addEventListener('click', fetchTTSAndPlay);
+                document.getElementById('get-critique')?.addEventListener('click', fetchCritique);
+                document.getElementById('start-record')?.addEventListener('click', startRecording);
+                document.getElementById('stop-record')?.addEventListener('click', stopRecording);
+                document.getElementById('play-recorded')?.addEventListener('click', playRecordedAudio);
+            }
+        }
+
+        // --- 應用程式初始化 (Initialization) ---
+
+        // 頁面載入時運行
+        document.addEventListener('DOMContentLoaded', () => {
+            // 首次處理講稿
+            dynamicSegments = processScript(rawScript);
+            
+            // 監聽 TTS 播放結束，清除音頻 URL 以便下次重新生成
+            ttsAudio.onended = () => ttsAudio.src = "";
+            
+            // 首次渲染
+            renderApp();
+        });
+
+    </script>
+</body>
+</html>
